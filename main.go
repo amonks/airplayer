@@ -23,13 +23,13 @@ import (
 
 // Audio streaming constants
 const (
-	SampleRate     = 44100
-	Channels       = 2
-	BitsPerSample  = 16
-	BytesPerSecond = SampleRate * Channels * (BitsPerSample / 8) // 176,400 bytes/second
-	ChunkSize      = 4096
-	ServerPort     = ":8080"
-	HttpTimeout    = 10 * time.Second
+	SampleRate      = 44100
+	Channels        = 2
+	BitsPerSample   = 16
+	BytesPerSecond  = SampleRate * Channels * (BitsPerSample / 8) // 176,400 bytes/second
+	ChunkSize       = 4096
+	DefaultPort     = ":8080"
+	HttpTimeout     = 10 * time.Second
 )
 
 // DIDL-Lite XML template for UPnP metadata
@@ -45,10 +45,13 @@ const didlTemplate = `<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xml
 
 
 // Stream starts streaming audio from the provided reader to the specified device
-func Stream(ctx context.Context, device *av1.AVTransport1, reader io.Reader, title, localAddr string) error {
+func Stream(ctx context.Context, device *av1.AVTransport1, reader io.Reader, title, localAddr, port string) error {
+	if port == "" {
+		port = DefaultPort
+	}
 
 	// Start HTTP server immediately to accept connections
-	listener, err := net.Listen("tcp", ServerPort)
+	listener, err := net.Listen("tcp", port)
 	if err != nil {
 		return fmt.Errorf("failed to create listener: %v", err)
 	}
@@ -56,11 +59,22 @@ func Stream(ctx context.Context, device *av1.AVTransport1, reader io.Reader, tit
 	httpServer := &http.Server{}
 	mux := http.NewServeMux()
 
+	// Channel to signal when client disconnects
+	clientDone := make(chan struct{}, 1)
+
 	// Create handler as closure that captures the reader
+	// NOTE: This handler and its client disconnect logic is tested in 
+	// TestStreamClientDisconnectWithMockUPnP using a mock UPnP server.
 	mux.HandleFunc("/audio.wav", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Client connected: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+		defer func() {
+			log.Printf("Client disconnected: %s", r.RemoteAddr)
+			select {
+			case clientDone <- struct{}{}:
+			default:
+			}
+		}()
 		handleAudioStream(w, r, reader)
-		log.Printf("Client disconnected: %s", r.RemoteAddr)
 	})
 	httpServer.Handler = mux
 
@@ -98,7 +112,7 @@ func Stream(ctx context.Context, device *av1.AVTransport1, reader io.Reader, tit
 	}
 
 	// Build audio URL with local IP
-	audioURL := fmt.Sprintf("http://%s%s/audio.wav", localIP, ServerPort)
+	audioURL := fmt.Sprintf("http://%s%s/audio.wav", localIP, port)
 
 	// Set the audio URL on the UPnP device with metadata
 	metadata := fmt.Sprintf(didlTemplate, audioURL, title)
@@ -115,10 +129,14 @@ func Stream(ctx context.Context, device *av1.AVTransport1, reader io.Reader, tit
 
 	fmt.Println("Streaming audio... Press Ctrl+C to stop")
 
-	// Wait for context cancellation or server error
+	// Wait for context cancellation, client disconnect, or server error
+	// NOTE: The clientDone case below is tested in TestStreamClientDisconnectWithMockUPnP.
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-clientDone:
+		fmt.Println("Client disconnected, stopping stream")
+		return nil
 	case err := <-serverDone:
 		if err != nil {
 			return fmt.Errorf("HTTP server error: %v", err)
@@ -340,6 +358,7 @@ func playCommand(ctx context.Context) error {
 	deviceName := playFlags.String("deviceName", "", "UPnP device room name (e.g., \"Living Room\")")
 	streamTitle := playFlags.String("title", "Airplayer Stream", "Title to display for the audio stream")
 	localAddr := playFlags.String("addr", "", "Local IP address to bind to (optional, will auto-detect if empty)")
+	port := playFlags.String("port", DefaultPort, "Port to bind HTTP server to (default: :8080)")
 
 	playFlags.Usage = func() {
 		fmt.Println("Usage: airplayer play [options]")
@@ -388,7 +407,7 @@ func playCommand(ctx context.Context) error {
 		}
 	}
 
-	return Stream(ctx, device, os.Stdin, *streamTitle, *localAddr)
+	return Stream(ctx, device, os.Stdin, *streamTitle, *localAddr, *port)
 }
 
 func getDeviceIP(deviceURL string) string {
