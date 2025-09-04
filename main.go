@@ -63,7 +63,7 @@ func Stream(ctx context.Context, device *av1.AVTransport1, reader io.Reader, tit
 	clientDone := make(chan struct{}, 1)
 
 	// Create handler as closure that captures the reader
-	// NOTE: This handler and its client disconnect logic is tested in 
+	// NOTE: This handler and its client disconnect logic is tested in
 	// TestStreamClientDisconnectWithMockUPnP using a mock UPnP server.
 	mux.HandleFunc("/audio.wav", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Client connected: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
@@ -145,7 +145,16 @@ func Stream(ctx context.Context, device *av1.AVTransport1, reader io.Reader, tit
 	}
 }
 
+var verbose = flag.Bool("v", false, "Enable verbose logging")
+
 func main() {
+	flag.Usage = printUsage
+	flag.Parse()
+
+	// Disable logging if not verbose
+	if !*verbose {
+		log.SetOutput(io.Discard)
+	}
 
 	// Set up context with signal handling
 	ctx, cancel := context.WithCancel(context.Background())
@@ -158,19 +167,20 @@ func main() {
 		cancel()
 	}()
 
-	if len(os.Args) < 2 {
+	args := flag.Args()
+	if len(args) < 1 {
 		printUsage()
 		os.Exit(1)
 	}
 
 	var err error
-	switch os.Args[1] {
+	switch args[0] {
 	case "discover":
 		err = discoverCommand()
 	case "play":
 		err = playCommand(ctx)
 	default:
-		err = fmt.Errorf("Unknown command: %s", os.Args[1])
+		err = fmt.Errorf("Unknown command: %s", args[0])
 		printUsage()
 	}
 
@@ -187,7 +197,13 @@ func main() {
 
 
 func printUsage() {
-	fmt.Println("Usage: airplayer <command> [options]")
+	fmt.Println("Usage: airplayer [options] <command> [command-options]")
+	fmt.Println()
+	fmt.Println("Airplayer streams PCM or WAV audio from stdin to UPnP/DLNA speakers (like Sonos)")
+	fmt.Println("over the network. It's suitable for use with MPD's Pipe output.")
+	fmt.Println()
+	fmt.Println("Global options:")
+	flag.PrintDefaults()
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  discover        List all UPnP AV devices on the network")
@@ -197,6 +213,18 @@ func printUsage() {
 }
 
 func discoverCommand() error {
+	discoverFlags := flag.NewFlagSet("discover", flag.ExitOnError)
+
+	discoverFlags.Usage = func() {
+		fmt.Println("Usage: airplayer discover")
+		fmt.Println()
+		fmt.Println("List all UPnP AV devices on the network")
+	}
+
+	// Skip the command name itself
+	args := flag.Args()[1:]
+	discoverFlags.Parse(args)
+
 	clients, _, err := av1.NewAVTransport1Clients()
 	if err != nil {
 		return fmt.Errorf("error discovering devices: %v", err)
@@ -371,7 +399,9 @@ func playCommand(ctx context.Context) error {
 		fmt.Println("Note: Use either -deviceURL OR -deviceName, not both. If neither is specified, uses first discovered device.")
 	}
 
-	playFlags.Parse(os.Args[2:])
+	// Skip the command name itself
+	args := flag.Args()[1:]
+	playFlags.Parse(args)
 
 	// Validate that both -deviceURL and -deviceName are not specified
 	if *deviceURL != "" && *deviceName != "" {
